@@ -30,6 +30,6 @@ R, tidyverse, glmnet, leaps, MASS
 
 ## Files
 - `analysis.Rmd` – code
-- `report.html` – full report (knit `analysis.Rmd` in RStudio to create it)
+- `report.html` – full report (download and open in a browser)
 
 > Note: the random seed was changed for this public version, so re-running the code may give slightly different numbers.
