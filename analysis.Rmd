@@ -1,0 +1,258 @@
+---
+title: "Household Energy Prediction: Ridge and Lasso Regression"
+author: "Bhuwan Aneja"
+date: "2026-10-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setting Up Data
+
+```{r}
+library(tidyverse)
+library(leaps)
+library(MASS)
+library(glmnet)
+select <- dplyr::select
+energy <- read.csv("HouseholdEnergy.csv") |> select(-household_id)
+dim(energy)
+```
+ 
+The data has 1,800 households and 14 predictors. household_id was removed  since it is only an identifier and should not be used as a predictor. MASS also has a select() function, so I set select to the dplyr version to avoid a clash.
+ 
+# Task 1
+ 
+## Part a
+ 
+```{r}
+ggplot(energy, aes(x = annual_kwh)) + geom_histogram(bins = 40) + labs(title = "Distribution of annual_kwh")
+ggplot(energy, aes(x = log(annual_kwh))) + geom_histogram(bins = 40) + labs(title = "Distribution of log(annual_kwh)")
+```
+ 
+The annual_kwh data shows an obvious right skewed pattern. The average household consumes 2,500 to 5,000 kWh per year with the peak number around 3,000 to 3,500 kWh, and there is a long tail where consumption reaches up to about 11,000 kWh, thus pushing the mean value (4,068) higher than the median value (3,751). However, once we log the data, the histogram shows a different picture. The log(annual_kwh) is rather symmetric and bell-shaped with mean equal to 8.2 and a nonexisting tail, which makes it more suitable for the linear model, as there are fewer heavy users whose influence is bigger on the results.
+ 
+## Part b
+ 
+```{r}
+quant_vars <- energy |> select(floor_area_m2, bedrooms, occupants, heated_area_m2, insulation_score, home_age_years, solar_kw, work_from_home_days, income_thousands, major_appliances, garden_area_m2)
+round(cor(quant_vars), 2)
+pairs(energy |> select(floor_area_m2, bedrooms, heated_area_m2))
+```
+ The ones that really dominate are floor_area_m2, bedrooms and heated_area_m2. The correlation coefficient for floor area is 0.74 with respect to bedrooms and 0.68 with respect to heated area; the correlation between bedrooms and heated area is 0.50. The pairs plot shows the presence of strong positive correlations among all of them; this is easy to understand, as they measure size of the house. Occupants and major_appliances have a moderate correlation of 0.55, while other predictors are almost uncorrelated.
+ 
+The very fact that multicollinearity exists is an issue for OLS, as the model finds it hard to distinguish the effects of predictors. Thus, the estimates appear with high variance and standard errors, meaning they can change drastically or even get flipped when there is a small change in the data to be predicted. It is also possible for a predictor to remain non significant on its own, while the entire group appears to be very important. Predictions can be made, but the individual coefficients become unstable.
+ 
+## Part c
+ 
+```{r}
+set.seed(2026)
+train_index <- sample(1:nrow(energy), round(0.75 * nrow(energy)))
+length(train_index)
+```
+ 
+I randomly sampled 1,350 households (75%) for the training set, and the remaining 450 households (25%) make up the test set.
+ 
+## Part d
+ 
+```{r}
+energy <- energy |> mutate(home_age_sq = home_age_years^2, heated_no_hp = heated_area_m2 * (1 - heat_pump), floor_x_occupants = floor_area_m2 * occupants, log_income = log(income_thousands))
+train <- energy[train_index, ]
+test <- energy[-train_index, ]
+new_terms <- energy |> select(home_age_sq, heated_no_hp, floor_x_occupants, log_income)
+summary(new_terms)
+round(cor(new_terms, log(energy$annual_kwh)), 2)
+round(cor(energy |> select(home_age_years, home_age_sq, heated_area_m2, heated_no_hp, floor_area_m2, occupants, floor_x_occupants, income_thousands, log_income)), 2)
+```
+The four new terms were added to the data before splitting into training and test sets, so both sets contain them. home_age_sq is almost the same as home_age_years (r = 0.95), and log_income is almost the same as income_thousands (r = 0.96), so on their own they mostly repeat information we already have, unless the relationship with energy use is curved. floor_x_occupants is the most interesting one, with a correlation of 0.62 with log(annual_kwh), which suggests that the effect of a bigger house depends on how many people live in it. heated_no_hp is zero for homes with a heat pump and equal to the heated area otherwise, so it lets heated area have a different effect in homes without a heat pump. log_income has essentially no relationship with the response (r = 0.01).
+ 
+Although lasso does variable selection automatically, transformations and interactions are still useful since lasso remains a linear model given whatever columns we provide. It cannot create curves or interactions on its own, it can only shrink or drop the predictors we provide. If there is a non linear relationship between the amount of energy consumption and the age of the home, or if the energy use of the floor area varies with the number of occupants, lasso can only detect this if the terms are proposed as candidates, and only then can it decide whether to keep them
+
+
+# Task 2
+ 
+## Part a
+ 
+```{r}
+train_orig <- train |> select(-home_age_sq, -heated_no_hp, -floor_x_occupants, -log_income)
+test_orig <- test |> select(-home_age_sq, -heated_no_hp, -floor_x_occupants, -log_income)
+step_raw <- stepAIC(lm(annual_kwh ~ ., data = train_orig), direction = "both", trace = FALSE)
+summary(step_raw)
+AIC(step_raw)
+```
+ 
+Sleeping rooms, income_thousands and rainwater_tank were gradually eliminated from the full linear model on the training data using both the forward and backward stepwise selection of AIC. The final model is
+
+annual_kwh ~ floor_area_m2 + occupants + heated_area_m2 + insulation_score + home_age_years + solar_kw + ev_owner + heat_pump + work_from_home_days + major_appliances + garden_area_m2
+
+with an AIC of 22233.73 and an adjusted R² of 0.644. Each term except 'garden_area_m2' (p = 0.098) is significant. AIC still retains it as its penalty on each parameter is less than 5% significance test. Furthermore, it should be noted that bedrooms was dropped, a result of the correlation in Task 1b, as the floor area index was maintained.
+ 
+## Part b
+ 
+```{r}
+step_log <- stepAIC(lm(log(annual_kwh) ~ ., data = train_orig), direction = "both", trace = FALSE)
+summary(step_log)
+AIC(step_log)
+```
+Using log(annual_kwh) as the response variable, AIC selected the same 11 predictors as with the original scale, which led to the exclusion of bedrooms, income_thousands and rainwater_tank from the analysis. The AIC for this model is equal to −507.59 and its adjusted R² value is equal to 0.680, which is slightly higher than on the original scale. Garden_area_m2 has reached significance at the 5% level(p = 0.016).
+
+## Part c
+
+```{r}
+c(raw = AIC(step_raw), log = AIC(step_log), log_on_kwh_scale = AIC(step_log) + 2 * sum(log(train_orig$annual_kwh)))
+```
+No, these two AIC values cannot be compared directly. The log-likelihood is determined by the response variable's density, and AIC is −2 times the log-likelihood + 2k. The likelihoods of the models are on entirely different scales, because one model is based on kWh and the other on log kWh. The AIC is much smaller for the log model due to the relative smallness of the log values and the smallness of the residuals (σ = 0.20, while for the model with the large log values, the residuals were 907).
+ 
+The likelihood of the log model must be transferred to the kWh scale, and this can be done by adding the Jacobian term, 2Σ log(yi, to its AIC to make a fair comparison. This results in 21789.55, which is less than 22233.73, meaning that the log scale would be preferred after the correction. It is important to note that the raw AIC values alone do not allow us to confirm this.
+ 
+## Part d
+ 
+```{r}
+x_train <- model.matrix(log(annual_kwh) ~ ., data = train_orig)[, -1]
+y_train <- log(train_orig$annual_kwh)
+x_test <- model.matrix(log(annual_kwh) ~ ., data = test_orig)[, -1]
+y_test <- log(test_orig$annual_kwh)
+ 
+allyhat <- function(xtrain, ytrain, xtest, ps){
+  yhat <- matrix(nrow = nrow(xtest), ncol = length(ps))
+  sub <- regsubsets(xtrain, ytrain, nvmax = 10)
+  summ <- summary(sub)
+  for(i in seq_along(ps)){
+    p <- ps[i]
+    betahat <- coef(sub, p)
+    yhat[, i] <- cbind(1, xtest)[, summ$which[p, ]] %*% betahat
+  }
+  yhat
+}
+ 
+set.seed(2026)
+n <- nrow(x_train)
+folds <- sample(rep(1:10, length.out = n))
+possible_ps <- 1:10
+fitted <- matrix(nrow = n, ncol = length(possible_ps))
+for(k in 1:10){
+  fitted[folds == k, ] <- allyhat(x_train[folds != k, ], y_train[folds != k], x_train[folds == k, ], possible_ps)
+}
+cv_mspe <- colMeans((y_train - fitted)^2)
+round(cv_mspe, 5)
+plot(possible_ps, cv_mspe, type = "b", xlab = "Number of predictors", ylab = "10-fold CV MSPE")
+best_p <- which.min(cv_mspe)
+best_p
+best_sub <- regsubsets(x_train, y_train, nvmax = 10)
+coef(best_sub, best_p)
+```
+ 
+I ran a 10-fold cross validation on the training data using an exhaustive best subset search, for models of up to 10 predictors. In each fold the most successful model of each size was identified in the remaining nine folds and then applied to the held out fold. The CV MSPE decreased along the way with the addition of predictors, from 0.0922 (one predictor) to 0.0405 (ten predictors), and thus the chosen size is 10. The selected variables are all included in the full training set: floor_area_m2, occupants, heated_area_m2, insulation_score, home_age_years, solar_kw, ev_owner, heat_pump, work_from_home_days, and major_appliances. This is the same as the AIC model from part (b) but without garden_area_m2.
+ 
+The plot also reveals that the curve levels off and does not get much different after the 7th or 8th predictor (0.0437, 0.0418, 0.0408, 0.0405), meaning that these last few predictors contribute very little. The minimum is just at the boundary of the search range, so a slightly larger model may perform slightly better. CV estimates are also noisy, so that may not be a genuine improvement from 8 to 10 predictors.
+ 
+## Part e
+Bestsubset and AIC selection make an all or nothing decision for each predictor, it is either in the model with its full OLS coefficient or left out completely. If two predictors are highly correlated, such as floor area, bedrooms, and heated area, then the information is similar, and the choice of which predictor to use may depend on minor details of the data. For a different sample or CV fold a different variable may be chosen from a group. In this data bedrooms was dropped, but floor area was held, which does not imply the lack of correlation between bedrooms and energy use. It's just as floor area suggests most of what bedrooms says.
+ 
+The coefficients of the variables that are fixed remain ordinary least squares estimates and they retain the extra variance due to the correlation, the selection is not responsible for making them any smaller. This makes the final model unstable and its coefficients easy to misinterpret. Moreover, the search over many possible models easily overfits, because the AIC penalty is too small to be conservative in the presence of a large number of models.
+ 
+# Task 3
+ 
+## Part a
+ 
+```{r}
+x_train_full <- model.matrix(log(annual_kwh) ~ ., data = train)[, -1]
+x_test_full <- model.matrix(log(annual_kwh) ~ ., data = test)[, -1]
+set.seed(2026)
+foldid <- sample(rep(1:10, length.out = nrow(x_train_full)))
+ridge_fit <- glmnet(x_train_full, y_train, alpha = 0)
+ridge_cv <- cv.glmnet(x_train_full, y_train, alpha = 0, foldid = foldid)
+plot(ridge_fit, xvar = "lambda")
+plot(ridge_cv)
+ridge_cv$lambda.min
+coef(ridge_fit, s = ridge_cv$lambda.min)
+```
+ 
+With 10-fold cross-validation, ridge regression had lambda.min = 0.02195 on the training data. The CV error is smallest when the smallest lambda glmnet is tried, so we see this is a case where a little shrinkage is helpful. The OLS fit is fairly stable, with 1,350 observations and the signal is pretty strong, so heavier penalties tend to add some bias.
+ 
+When the predictors are correlated, Ridge is helpful since the penalty term is λΣβj^2 to the sum of squares. Predictors that are highly correlated make XᵀX very near to being singular, which is why the OLS coefficients are so variable. If λ is added to the diagonal of XᵀX, then the estimates are stable and the XᵀX becomes well conditioned. In practice, ridge encourages the coefficients of correlated predictors to converge towards one another, and to allocate their contribution uniformly across the group, rather than just assigning it randomly to one variable. This sacrifices a little bias for a lot of reduction in variance, sometimes resulting in better predictions.
+ 
+## Part b
+ 
+```{r}
+lasso_fit <- glmnet(x_train_full, y_train, alpha = 1)
+lasso_cv <- cv.glmnet(x_train_full, y_train, alpha = 1, foldid = foldid)
+plot(lasso_fit, xvar = "lambda")
+plot(lasso_cv)
+lasso_cv$lambda.min
+lasso_coef <- coef(lasso_fit, s = lasso_cv$lambda.min)
+lasso_coef
+rownames(lasso_coef)[lasso_coef[, 1] != 0]
+```
+The lasso gave lambda.min = 0.000326. 17 of the 18 predictors have non zero coefficients at this value: floor_area_m2, bedrooms, occupants, heated_area_m2, insulation_score, home_age_years, solar_kw, ev_owner, heat_pump, work_from_home_days, income_thousands, major_appliances, rainwater_tank, garden_area_m2, home_age_sq, heated_no_hp, floor_x_occupants. log_income was the only item that was set to zero. Since lambda.min is very small, very little shrinkage is applied. The CV plot is almost flat from about −log(λ) = 5 onwards, and lambda.1se (the left dotted line) gives a much sparser model with about 12 predictors and almost the same CV error.
+ 
+## Part c
+ 
+```{r}
+round(cbind(ridge = coef(ridge_fit, s = ridge_cv$lambda.min)[, 1], lasso = lasso_coef[, 1]), 5)
+```
+The first difference is obvious, it's sparsity. Ridge keeps all 18 predictors with non zero coefficients, while lasso sets log_income exactly to zero, so only lasso actually does variable selection, although with such a small lambda.min it only drops one term here.
+ 
+Different behaviour of the two methods is seen in the correlated predictors. In the house size group, ridge has a larger coefficient for the number of bedrooms (0.0084) and a smaller coefficient for house size (0.0016) than the lasso does (0.0032 and 0.0021). Income_thousands and log_income are nearly identical and ridge retains both while lasso retains one and drops the other.For occupants and floor_x_occupants, ridge puts more weight on the interaction (0.00022 vs 0.00010) and less on occupants (0.049 vs 0.071). heat_pump was negative in Task 2, but is now positive in both models and  the reason is that more of the heat pump effect is now included in heated_no_hp. A good reminder that correlated coefficients cannot be read independently. Overall, the ridge coefficients are smaller in size, as we would expect given the higher level of shrinkage.
+ 
+## Part d
+ 
+```{r}
+lasso_fit_orig <- glmnet(x_train, y_train, alpha = 1)
+lasso_cv_orig <- cv.glmnet(x_train, y_train, alpha = 1, foldid = foldid)
+coef(lasso_fit_orig, s = lasso_cv_orig$lambda.min)
+c(original = min(lasso_cv_orig$cvm), expanded = min(lasso_cv$cvm))
+```
+ 
+The CV MSE for the lasso with just the original predictors was 0.0405 and the expanded model was 0.0380, about 6% lower, a difference larger than the standard error bars, which means that the expanded attributes are helpful. Three of the four new terms were kept in the model: home_age_sq captures a non linear effect of age, heated_no_hp indicates an extra effect of the heated area in the absence of a heat pump, and floor_x_occupants allows the effect of floor area to be a function of the number of occupants. log_Income was dropped from the model since it is not related to energy use. The new terms captured curvature and an interaction that the original predictors failed to capture, while lasso ignored the one that did not help
+
+## part e
+ 
+Both methods can produce simple models, and lasso has some obvious benefits here. AIC selection uses the full OLS estimates, so the extra variance from correlated predictors remains, while lasso shrinks the parameters it retains, reducing the variance of these parameters. In addition, lasso is continuous, meaning the coefficients continuously approach zero as λ changes, and subset selection does in or out decisions that can be reversed by small changes in the data, particularly when predictors are correlated, such as in floor area, number of bedrooms and number of heated area. The value of λ in lasso is selected via cross-validation to minimise prediction error, whereas the penalty in AIC is fixed to 2 for every parameter which is likely to overfit when comparing many different models. Finally, lasso handles many candidate terms with ease, including the 18 here, whereas best subset search increases by a factor of 2p and was capped at 10 predictors.
+ 
+# Task 4
+ 
+## Part a
+ 
+```{r}
+leaps_beta <- coef(best_sub, best_p)
+pred_leaps <- cbind(1, x_test[, names(leaps_beta)[-1]]) %*% leaps_beta
+pred_ridge <- predict(ridge_fit, x_test_full, s = ridge_cv$lambda.min)
+pred_lasso <- predict(lasso_fit, x_test_full, s = lasso_cv$lambda.min)
+rmse <- function(actual, pred) sqrt(mean((actual - pred)^2))
+rmse_log <- c(leaps = rmse(y_test, pred_leaps), ridge = rmse(y_test, pred_ridge), lasso = rmse(y_test, pred_lasso))
+round(rmse_log, 5)
+```
+ 
+The test RMSE on the log scale for the 450 test households was 0.1931, 0.1890 and 0.1876 for the cross-validated best subset model, for ridge and lasso, respectively. The error for lasso is the lowest, approximately 3% lower than for best subset, followed by ridge. These differences are rather small, and all three models predict well, but the penalised ones do slightly better.
+ 
+## Part b
+ 
+```{r}
+rmse_kwh <- c(leaps = rmse(test$annual_kwh, exp(pred_leaps)), ridge = rmse(test$annual_kwh, exp(pred_ridge)), lasso = rmse(test$annual_kwh, exp(pred_lasso)))
+round(rmse_kwh, 2)
+rank(rmse_log)
+rank(rmse_kwh)
+```
+ 
+The results of the back transformation using exp() were an RMSE of 754.69 kWh for best subset, 741.63 kWh for ridge, and 741.30 kWh for lasso. The ranking is the same as on the log scale, but ridge and lasso are now almost tied. The rankings do not have to be the same as the log scale RMSE is based on relative errors and assigns equal weight to all households while RMSE in kWh is based on absolute errors and the largest users take up the majority of weight, therefore a model that performs better in the percentage domain might perform worse for the largest households. In addition, the exp() of a predicted mean log value will produce a predicted median for y which is also biased low and may vary by model.
+ 
+## Part c
+ 
+On both scales lasso outperformed the other models, followed by ridge, and best subset last. The increased gain is due to four additional terms, which have been added to account for the curvature of the age effect and the floor area and occupants interaction, and to shrinkage reducing variance. The improvement is not much since there are only 1,350 training observations and the OLS fit is already very stable.
+
+To be easily interpreted, best subset is the simplest, with 10 predictors and ordinary OLS coefficients that the retailer can simply read. Lasso at lambda.min retained 17 of 18 terms, so it provided little sparsity here, but lambda.1se would have resulted in a simpler model with similar CV error. Ridge includes every 18 terms and overlapping terms like home age and its square give difficult to interpret coefficients.
+
+The most stable is ridge, which shrinks correlated coefficients together without in or out decisions. Lasso is more stable than subset selection, but when variables are highly correlated it may pick one of them somewhat arbitrarily, such as when log_income was dropped and income_thousands was retained. Best subset is the least stable, since a small change in the data can change which of floor area, bedrooms and heated area is selected, and its least squares coefficients are not shrunk
+
+Lasso is the most suitable choice for the retailer, since it provides the best predictions and is reasonably tough with correlated predictors, while also displaying which predictors are relevant.
+
+
+
+# Citations and Acknowledgements
+
+The methods used in this report, including AIC based stepwise selection, best subset selection with 10-fold cross-validation, ridge and lasso regression, and test set comparison using RMSE, were based on concepts covered in the STATS 369 lecture notes and course materials. The analysis used the R packages tidyverse, leaps, MASS and glmnet.
+
+I used Claude to help write the R code, following the methods taught in the course, and to draft and organise the written explanations. I ran all code myself in RStudio, checked the outputs and graphs, and revised and edited the explanations so that the final interpretations are based on the results produced by my analysis.
